@@ -52,19 +52,32 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
     print(f"COLUMN MAPPING FOR {seed_name.upper()}")
     print("="*60)
     
-    if mapping_info['join_key']:
-        print(f"Join Key: {mapping_info['join_key']['input']} -> {seed_name}.{mapping_info['join_key']['seed']}")
-    
-    # Print the semantic column mappings
-    print("\nColumn Mappings:")
-    if semantic_mappings:
-        # Sort by confidence
-        for mapping in sorted(semantic_mappings, key=lambda x: x['confidence'], reverse=True):
+    # Print the semantic column mappings in format: input_col -> seed_name.seed_col
+    print("\nHigh Confidence Mappings (80%+):")
+    high_confidence = [m for m in semantic_mappings if m['confidence'] >= 0.8]
+    if high_confidence:
+        for mapping in sorted(high_confidence, key=lambda x: x['confidence'], reverse=True):
             confidence_percent = int(mapping['confidence'] * 100)
-            if confidence_percent >= 60:  # Only show reasonably confident mappings
-                print(f"{mapping['input_col']} -> {seed_name}.{mapping['seed_col']} ({confidence_percent}% confidence)")
+            input_col = mapping['input_col']
+            seed_col = mapping['seed_col']
+            print(f"{input_col} → {seed_name}.{seed_col} ({confidence_percent}%)")
     else:
-        print("No column mappings found")
+        print("No high confidence mappings found")
+    
+    print("\nMedium Confidence Mappings (60-80%):")
+    medium_confidence = [m for m in semantic_mappings if 0.6 <= m['confidence'] < 0.8]
+    if medium_confidence:
+        for mapping in sorted(medium_confidence, key=lambda x: x['confidence'], reverse=True):
+            confidence_percent = int(mapping['confidence'] * 100)
+            input_col = mapping['input_col']
+            seed_col = mapping['seed_col']
+            print(f"{input_col} → {seed_name}.{seed_col} ({confidence_percent}%)")
+    else:
+        print("No medium confidence mappings found")
+    
+    # Also print the join key as a special mapping if it wasn't already included
+    if mapping_info['join_key'] and not any(mapping['input_col'] == mapping_info['join_key']['input'] for mapping in semantic_mappings):
+        print(f"\nJoin Key: {mapping_info['join_key']['input']} → {seed_name}.{mapping_info['join_key']['seed']} (Join Key)")
     
     return result_df, output_file, mapping_info, semantic_mappings
 

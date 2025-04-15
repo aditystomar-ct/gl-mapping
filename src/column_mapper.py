@@ -310,6 +310,50 @@ class ColumnMapper:
         # Make a copy to avoid modifying the original
         df = df.copy()
         
+        # Handle unnamed columns
+        new_column_names = []
+        for i, col_name in enumerate(df.columns):
+            col_str = str(col_name)
+            
+            # Check if this is an unnamed column
+            if 'Unnamed:' in col_str:
+                # Try to infer a better name from the first few non-empty values
+                non_empty_values = df[col_name].dropna().head(5)
+                
+                if len(non_empty_values) > 0:
+                    # Try to get a good column name from the data
+                    potential_headers = [str(v) for v in non_empty_values
+                                      if not re.match(r'^\d+(\.\d+)?$', str(v))  # Not just a number
+                                      and len(str(v)) < 30                      # Not too long
+                                      and len(str(v)) > 2]                      # Not too short
+                    
+                    if potential_headers:
+                        # Use the first good potential header
+                        new_name = potential_headers[0]
+                    else:
+                        # If no good header found, use a descriptive name with column position
+                        col_idx = int(re.search(r'\d+', col_str).group()) if re.search(r'\d+', col_str) else i
+                        new_name = f"Data_Column_{col_idx}"
+                else:
+                    # If column is empty, name it accordingly
+                    col_idx = int(re.search(r'\d+', col_str).group()) if re.search(r'\d+', col_str) else i
+                    new_name = f"Empty_Column_{col_idx}"
+            else:
+                # Not an unnamed column, keep the original name
+                new_name = col_str
+            
+            # Ensure unique column names
+            if new_name in new_column_names:
+                suffix = 1
+                while f"{new_name}_{suffix}" in new_column_names:
+                    suffix += 1
+                new_name = f"{new_name}_{suffix}"
+                
+            new_column_names.append(new_name)
+        
+        # Set the new column names
+        df.columns = new_column_names
+        
         # Strip whitespace from column names
         df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
         

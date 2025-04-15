@@ -1,0 +1,20 @@
+# Python artifacts
+.DS_Store
+.ipynb_checkpoints
+__pycache__
+.vscode
+
+# Env
+.env
+
+# Images, Documents
+*.jpg
+*.png
+*.pdf
+*.pickle
+*.pkl
+# Data folders
+data
+.aws/credentials
+# Custom 
+*ignore*.ipynb
