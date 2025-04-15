@@ -1,0 +1,12 @@
+# Core dependencies with specific versions for Python 3.12 compatibility
+numpy==1.26.0
+pandas==2.1.1
+pytest==7.4.0
+python-dotenv==1.0.0
+
+# Excel file handling
+openpyxl==3.1.2  # For reading Excel files (.xlsx)
+xlrd==2.0.1      # For reading older Excel files (.xls)
+
+# Web interface
+streamlit==1.27.0
