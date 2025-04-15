@@ -8,11 +8,13 @@ based on seed files that define the mapping relationships.
 import pandas as pd
 import numpy as np
 import re
+import itertools
 
 
 class ColumnMapper:
     """
     A class to handle column mapping between different data sources.
+    Identifies primary-foreign key relationships between datasets.
     """
     
     def __init__(self):
@@ -20,11 +22,26 @@ class ColumnMapper:
         Initialize the ColumnMapper.
         """
         self.mapping_cache = {}
-        # Common variations of GSTIN column names
+        
+        # Common variations of business identifier column names
         self.gstin_column_patterns = [
             r'gstin',
             r'gst.*(id|number|no)',
             r'tax.*(id|number|no)'
+        ]
+        
+        # Common business key patterns for mapping
+        self.business_key_patterns = {
+            'company_id': [r'company.*(id|code|no)', r'org.*(id|code|no)', r'entity.*(id|code|no)'],
+            'party_id': [r'(party|customer|vendor|supplier).*(id|code|no)'],
+            'invoice_id': [r'invoice.*(id|no|number|code)', r'bill.*(id|no|number)'],
+            'location_id': [r'location.*(id|code)', r'branch.*(id|code)', r'place.*(id|code)', r'site.*(id|code)']
+        }
+        
+        # Common primary key column names
+        self.primary_key_patterns = [
+            r'id$', r'^code$', r'key$', r'number$',
+            r'^pk_', r'primary.*key'
         ]
     
     def map_columns(self, input_df, seed_df):
@@ -297,6 +314,293 @@ class ColumnMapper:
         
         return list(unique_mappings.values())
     
+    def analyze_seed_files_together(self, input_df, seed_dfs_dict):
+        """
+        Analyze multiple seed files together to find the best mapping strategy.
+        
+        Args:
+            input_df (pd.DataFrame): The input dataframe
+            seed_dfs_dict (dict): Dictionary of {seed_name: seed_df} pairs
+            
+        Returns:
+            dict: Information about cross-seed relationships and best mapping strategy
+        """
+        # Preprocess all dataframes
+        input_df = self._preprocess_dataframe(input_df)
+        preprocessed_seeds = {name: self._preprocess_dataframe(df) for name, df in seed_dfs_dict.items()}
+        
+        # Find primary/foreign key candidates in each seed file
+        pk_candidates_by_seed = {}
+        for seed_name, seed_df in preprocessed_seeds.items():
+            pk_candidates_by_seed[seed_name] = self._find_primary_key_candidates(seed_df)
+        
+        # Find common columns between seed files
+        common_columns = {}
+        for seed1, seed2 in itertools.combinations(preprocessed_seeds.keys(), 2):
+            seed1_df = preprocessed_seeds[seed1]
+            seed2_df = preprocessed_seeds[seed2]
+            
+            seed1_cols = set(seed1_df.columns)
+            seed2_cols = set(seed2_df.columns)
+            
+            # Check for exact name matches
+            exact_matches = seed1_cols.intersection(seed2_cols)
+            
+            # Check for content overlaps in columns
+            content_matches = []
+            for col1 in seed1_df.columns:
+                for col2 in seed2_df.columns:
+                    # Skip if already an exact match
+                    if col1 == col2:
+                        continue
+                    
+                    # Check for content overlap
+                    vals1 = set(seed1_df[col1].dropna().astype(str))
+                    vals2 = set(seed2_df[col2].dropna().astype(str))
+                    
+                    if vals1 and vals2:
+                        overlap = len(vals1.intersection(vals2))
+                        if overlap > 0:
+                            overlap_ratio = overlap / min(len(vals1), len(vals2))
+                            if overlap_ratio > 0.5:  # More than 50% overlap
+                                content_matches.append({
+                                    'seed1_col': col1,
+                                    'seed2_col': col2,
+                                    'overlap_ratio': overlap_ratio
+                                })
+            
+            common_columns[f"{seed1}_{seed2}"] = {
+                'exact_matches': list(exact_matches),
+                'content_matches': content_matches
+            }
+        
+        # Find the best mapping strategy between input and all seed files
+        input_to_seed_mappings = {}
+        for seed_name, seed_df in preprocessed_seeds.items():
+            # 1. Check for direct primary/foreign key relationships
+            pk_fk_relationships = self.identify_primary_foreign_keys(input_df, seed_df, seed_name)
+            
+            # 2. Get column semantic mappings
+            semantic_mappings = self.analyze_column_semantic_similarity(input_df, seed_df, seed_name)
+            
+            input_to_seed_mappings[seed_name] = {
+                'pk_fk_relationships': pk_fk_relationships,
+                'semantic_mappings': semantic_mappings
+            }
+        
+        # Identify which seed file provides the best mapping to the input file
+        best_seed = None
+        best_score = -1
+        best_key_pair = None
+        
+        for seed_name, mappings in input_to_seed_mappings.items():
+            if mappings['pk_fk_relationships']:
+                best_rel = mappings['pk_fk_relationships'][0]  # Best relationship for this seed
+                score = best_rel['confidence'] * best_rel['overlap_ratio']
+                
+                if score > best_score:
+                    best_score = score
+                    best_seed = seed_name
+                    best_key_pair = {
+                        'primary_key': f"{seed_name}.{best_rel['primary_key']}",
+                        'foreign_key': best_rel['foreign_key'],
+                        'confidence': best_rel['confidence']
+                    }
+        
+        # Generate recommendations
+        recommendations = {
+            'best_seed_file': best_seed,
+            'best_key_pair': best_key_pair,
+            'common_columns_between_seeds': common_columns,
+            'all_mappings': input_to_seed_mappings
+        }
+        
+        return recommendations
+        
+    def identify_primary_foreign_keys(self, input_df, seed_df, seed_name):
+        """
+        Identify potential primary key in seed file and corresponding foreign key in input file.
+        
+        Args:
+            input_df (pd.DataFrame): The input dataframe
+            seed_df (pd.DataFrame): The seed dataframe (master file)
+            seed_name (str): Name of the seed file
+            
+        Returns:
+            dict: Dictionary containing primary-foreign key relationship info
+        """
+        # Preprocess dataframes
+        input_df = self._preprocess_dataframe(input_df)
+        seed_df = self._preprocess_dataframe(seed_df)
+        
+        # Step 1: Identify primary key candidates in seed file
+        pk_candidates = self._find_primary_key_candidates(seed_df)
+        
+        # Step 2: For each primary key candidate, find potential foreign key matches in input file
+        relationships = []
+        
+        for pk_info in pk_candidates:
+            pk_col = pk_info['column']
+            fk_matches = self._find_foreign_key_matches(pk_col, seed_df, input_df)
+            
+            for fk_match in fk_matches:
+                relationships.append({
+                    'seed_name': seed_name,
+                    'primary_key': pk_col,
+                    'foreign_key': fk_match['column'],
+                    'match_type': fk_match['match_type'],
+                    'overlap_ratio': fk_match['overlap_ratio'],
+                    'confidence': fk_match['confidence']
+                })
+        
+        # Step 3: Sort relationships by confidence
+        relationships.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        return relationships
+    
+    def _find_primary_key_candidates(self, df):
+        """
+        Find columns that could serve as primary keys in the dataframe.
+        
+        Args:
+            df (pd.DataFrame): The dataframe to analyze
+            
+        Returns:
+            list: List of dictionaries containing primary key candidate info
+        """
+        pk_candidates = []
+        
+        # Check each column for primary key properties
+        for col in df.columns:
+            # Skip columns with too many missing values
+            missing_ratio = df[col].isna().mean()
+            if missing_ratio > 0.1:  # More than 10% missing values
+                continue
+            
+            # Calculate uniqueness ratio
+            uniqueness_ratio = df[col].nunique() / len(df)
+            
+            # Check if column name matches primary key patterns
+            name_match = False
+            col_lower = str(col).lower()
+            for pattern in self.primary_key_patterns:
+                if re.search(pattern, col_lower):
+                    name_match = True
+                    break
+            
+            # Calculate confidence based on uniqueness and name
+            base_confidence = uniqueness_ratio
+            if name_match:
+                base_confidence += 0.2  # Boost confidence if name suggests key
+            
+            # Only consider as PK if reasonably unique
+            if uniqueness_ratio > 0.8:  # At least 80% unique values
+                pk_candidates.append({
+                    'column': col,
+                    'uniqueness_ratio': uniqueness_ratio,
+                    'name_match': name_match,
+                    'confidence': min(base_confidence, 1.0)  # Cap at 1.0
+                })
+            
+        # Sort by confidence
+        pk_candidates.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        return pk_candidates
+    
+    def _find_foreign_key_matches(self, pk_col, seed_df, input_df):
+        """
+        Find columns in input_df that could be foreign keys to seed_df[pk_col].
+        
+        Args:
+            pk_col (str): Primary key column in seed_df
+            seed_df (pd.DataFrame): The seed dataframe
+            input_df (pd.DataFrame): The input dataframe
+            
+        Returns:
+            list: List of dictionaries containing foreign key match info
+        """
+        fk_matches = []
+        
+        # Get primary key values
+        pk_values = set(seed_df[pk_col].dropna().astype(str))
+        
+        # Check each column in input_df for overlap with pk_values
+        for col in input_df.columns:
+            # Get column values
+            col_values = set(input_df[col].dropna().astype(str))
+            
+            if not col_values:  # Skip empty columns
+                continue
+            
+            # Calculate overlap
+            overlap = len(pk_values.intersection(col_values))
+            
+            if overlap > 0:
+                # Calculate ratio of input values that exist in the primary key
+                overlap_ratio = overlap / len(col_values)
+                
+                # Check for name similarity
+                name_similarity = self._calculate_name_similarity(pk_col, col)
+                
+                # Calculate confidence based on overlap and name similarity
+                confidence = (0.7 * overlap_ratio) + (0.3 * name_similarity)
+                
+                # Determine match type
+                match_type = "content_match"
+                if name_similarity > 0.8:
+                    match_type = "name_and_content_match"
+                
+                # Only include if reasonable overlap
+                if overlap_ratio > 0.1:  # At least 10% overlap
+                    fk_matches.append({
+                        'column': col,
+                        'overlap': overlap,
+                        'overlap_ratio': overlap_ratio,
+                        'name_similarity': name_similarity,
+                        'match_type': match_type,
+                        'confidence': confidence
+                    })
+        
+        # Sort by confidence
+        fk_matches.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        return fk_matches
+    
+    def _calculate_name_similarity(self, col1, col2):
+        """
+        Calculate similarity between column names.
+        
+        Args:
+            col1 (str): First column name
+            col2 (str): Second column name
+            
+        Returns:
+            float: Similarity score between 0 and 1
+        """
+        col1_lower = str(col1).lower()
+        col2_lower = str(col2).lower()
+        
+        # Exact match
+        if col1_lower == col2_lower:
+            return 1.0
+        
+        # One is substring of the other
+        if col1_lower in col2_lower or col2_lower in col1_lower:
+            # Calculate ratio based on length
+            longer = max(len(col1_lower), len(col2_lower))
+            shorter = min(len(col1_lower), len(col2_lower))
+            return 0.5 + (0.4 * (shorter / longer))
+        
+        # Check for common business key patterns
+        for key_type, patterns in self.business_key_patterns.items():
+            col1_match = any(re.search(pattern, col1_lower) for pattern in patterns)
+            col2_match = any(re.search(pattern, col2_lower) for pattern in patterns)
+            if col1_match and col2_match:
+                return 0.8  # Both match the same business key pattern
+        
+        # Default similarity for different names
+        return 0.1
+    
     def _preprocess_dataframe(self, df):
         """
         Preprocess dataframe to standardize column names and data formats.
@@ -357,8 +661,19 @@ class ColumnMapper:
         # Strip whitespace from column names
         df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
         
-        # Strip whitespace from string columns
+        # Convert all object dtype columns to strings and handle mixed types
+        # This ensures proper Arrow serialization
         for col in df.select_dtypes(include=['object']).columns:
-            df[col] = df[col].astype(str).str.strip()
+            try:
+                # Convert to string and handle special cases
+                df[col] = df[col].astype(str)
+                # Replace 'nan' strings and empty strings with NaN
+                df[col] = df[col].replace(['nan', 'None', ''], np.nan)
+                # Strip whitespace
+                df[col] = df[col].str.strip()
+            except Exception as e:
+                print(f"Warning: Could not process column '{col}': {str(e)}")
+                # Fallback: force convert problematic values
+                df[col] = df[col].apply(lambda x: str(x) if x is not None else np.nan)
         
         return df

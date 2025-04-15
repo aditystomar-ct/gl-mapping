@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-"""
-Main application file for GL Mapping project.
-This script handles the main workflow for mapping columns from input files
-using seed files as reference.
 
-The application provides both a command-line interface and a Streamlit web interface.
-"""
 
 import os
 import pandas as pd
 import glob
 import sys
 import tempfile
+import itertools
 from datetime import datetime
 from column_mapper import ColumnMapper
 
@@ -29,7 +23,7 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
         output_dir (str): Directory to save output files
         
     Returns:
-        tuple: (result_dataframe, output_file_path, mapping_info, semantic_mappings)
+        tuple: (result_dataframe, output_file_path, mapping_info, semantic_mappings, pk_fk_relationships)
     """
     # Initialize the column mapper
     mapper = ColumnMapper()
@@ -40,6 +34,9 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
     # Analyze semantic similarity between columns
     semantic_mappings = mapper.analyze_column_semantic_similarity(input_df, seed_df, seed_name)
     
+    # Identify primary-foreign key relationships
+    pk_fk_relationships = mapper.identify_primary_foreign_keys(input_df, seed_df, seed_name)
+    
     # Generate output filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(output_dir, f"mapped_{seed_name}_{timestamp}.csv")
@@ -47,12 +44,32 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
     # Save the result
     result_df.to_csv(output_file, index=False)
     
-    # Print the join key information
+    # Print detailed mapping information
     print("\n" + "="*60)
-    print(f"COLUMN MAPPING FOR {seed_name.upper()}")
+    print(f"PRIMARY-FOREIGN KEY RELATIONSHIPS FOR {seed_name.upper()}")
     print("="*60)
     
-    # Print the semantic column mappings in format: input_col -> seed_name.seed_col
+    if pk_fk_relationships:
+        # Show all primary-foreign key relationships
+        print("\nAll Possible Mapping Options:")
+        for i, rel in enumerate(pk_fk_relationships):
+            confidence_percent = int(rel['confidence'] * 100)
+            overlap_percent = int(rel['overlap_ratio'] * 100)
+            print(f"\nOption {i+1}:")
+            print(f"Primary Key: {seed_name}.{rel['primary_key']}")
+            print(f"Foreign Key: {rel['foreign_key']}")
+            print(f"Match Type: {rel['match_type']}")
+            print(f"Confidence: {confidence_percent}%")
+            print(f"Value Overlap: {overlap_percent}%")
+    else:
+        print("No primary-foreign key relationships found")
+    
+    # Also show column mappings
+    print("\n" + "="*60)
+    print(f"COLUMN MAPPINGS FOR {seed_name.upper()}")
+    print("="*60)
+    
+    # Print the semantic column mappings
     print("\nHigh Confidence Mappings (80%+):")
     high_confidence = [m for m in semantic_mappings if m['confidence'] >= 0.8]
     if high_confidence:
@@ -75,11 +92,7 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
     else:
         print("No medium confidence mappings found")
     
-    # Also print the join key as a special mapping if it wasn't already included
-    if mapping_info['join_key'] and not any(mapping['input_col'] == mapping_info['join_key']['input'] for mapping in semantic_mappings):
-        print(f"\nJoin Key: {mapping_info['join_key']['input']} → {seed_name}.{mapping_info['join_key']['seed']} (Join Key)")
-    
-    return result_df, output_file, mapping_info, semantic_mappings
+    return result_df, output_file, mapping_info, semantic_mappings, pk_fk_relationships
 
 
 def run_cli(output_dir='output'):
@@ -147,21 +160,87 @@ def run_cli(output_dir='output'):
             selected_seed_files = seed_files
     else:
         selected_seed_files = seed_files
+
+    # First load all seed files into a dictionary
+    seed_dfs_dict = {}
+    for seed_file in selected_seed_files:
+        seed_path = os.path.join(seed_dir, seed_file)
+        seed_df = pd.read_csv(seed_path, skipinitialspace=True)
+        seed_name = os.path.splitext(os.path.basename(seed_file))[0]
+        seed_dfs_dict[seed_name] = seed_df
+        print(f"Loaded seed file: {seed_file} with {len(seed_df)} rows")
     
-    # Process each selected seed file
+    # Analyze all seed files together first
+    if len(seed_dfs_dict) > 1:
+        print("\n" + "="*60)
+        print("ANALYZING ALL SEED FILES TOGETHER")
+        print("="*60)
+        
+        mapper = ColumnMapper()
+        cross_seed_analysis = mapper.analyze_seed_files_together(input_df, seed_dfs_dict)
+        
+        # Also collect individual analyses for each seed file
+        for seed_name, seed_df in seed_dfs_dict.items():
+            # Analyze semantic similarity between columns
+            semantic_mappings = mapper.analyze_column_semantic_similarity(input_df, seed_df, seed_name)
+            
+            # Identify primary-foreign key relationships
+            pk_fk_relationships = mapper.identify_primary_foreign_keys(input_df, seed_df, seed_name)
+            
+            # Store in the cross-seed analysis results if not already there
+            if 'all_mappings' not in cross_seed_analysis:
+                cross_seed_analysis['all_mappings'] = {}
+                
+            if seed_name not in cross_seed_analysis['all_mappings']:
+                cross_seed_analysis['all_mappings'][seed_name] = {}
+                
+            cross_seed_analysis['all_mappings'][seed_name]['semantic_mappings'] = semantic_mappings
+            cross_seed_analysis['all_mappings'][seed_name]['pk_fk_relationships'] = pk_fk_relationships
+        
+        # Print the cross-seed analysis results
+        print("\nCross-Seed Analysis Results:")
+        print("Examining all seed files for potential column mappings:")
+        
+        # Show relationship possibilities across all seed files
+        print("\nPotential relationships from all seed files:")
+        for seed_name, mappings in cross_seed_analysis['all_mappings'].items():
+            print(f"\n- Seed File: {seed_name}")
+            
+            if mappings['pk_fk_relationships']:
+                print("  Possible primary-foreign key mappings:")
+                for i, rel in enumerate(mappings['pk_fk_relationships'][:5]):  # Show top 5 for readability
+                    confidence_percent = int(rel['confidence'] * 100)
+                    overlap_percent = int(rel['overlap_ratio'] * 100)
+                    print(f"    {i+1}. {rel['foreign_key']} → {seed_name}.{rel['primary_key']} (Confidence: {confidence_percent}%, Overlap: {overlap_percent}%)")
+            else:
+                print("  No primary-foreign key relationships found")
+        
+        # Print common columns between seed files
+        print("\nCommon Columns Between Seed Files:")
+        for key, common in cross_seed_analysis['common_columns_between_seeds'].items():
+            seed_names = key.split('_')
+            print(f"\nBetween {seed_names[0]} and {seed_names[1]}:")
+            
+            if common['exact_matches']:
+                print(f"Exact matches: {', '.join(common['exact_matches'])}")
+            
+            if common['content_matches']:
+                print("Content matches:")
+                for match in common['content_matches']:
+                    print(f"  {match['seed1_col']} ↔ {match['seed2_col']} (Overlap: {int(match['overlap_ratio']*100)}%)")
+    
+    # Then process each seed file individually
     for seed_file in selected_seed_files:
         print("\n" + "="*60)
         print(f"PROCESSING SEED FILE: {seed_file}")
         print("="*60)
         
-        seed_path = os.path.join(seed_dir, seed_file)
-        # Handle potential issues with CSV files (like commas in headers)
-        seed_df = pd.read_csv(seed_path, skipinitialspace=True)
+        seed_name = os.path.splitext(os.path.basename(seed_file))[0]
+        seed_df = seed_dfs_dict[seed_name]
         print(f"Processing seed file: {seed_file} with {len(seed_df)} rows")
         
         # Process the mapping
-        seed_name = os.path.splitext(os.path.basename(seed_file))[0]
-        _, output_file, mapping_info, semantic_mappings = process_mapping(input_df, seed_df, seed_name, output_dir)
+        _, output_file, mapping_info, semantic_mappings, pk_fk_relationships = process_mapping(input_df, seed_df, seed_name, output_dir)
         print(f"Saved mapped data to {output_file}")
     
     print("GL mapping completed successfully")
@@ -331,23 +410,163 @@ def run_streamlit():
             
             st.write(f"Found {len(all_seed_files)} seed files")
             
-            # Create tabs for each seed file result
-            tabs = st.tabs([seed['name'] for seed in all_seed_files])
+            # Create expanders for each seed file result
+            
+            # First analyze all seed files together if more than one
+            if len(all_seed_files) > 1:
+                status_text.text("Analyzing all seed files together...")
+                progress_bar.progress(45)
+                
+                # Create a dictionary of all seed dataframes
+                seed_dfs_dict = {
+                    os.path.splitext(seed['name'])[0]: seed['df']
+                    for seed in all_seed_files
+                }
+                
+                # Analyze all seed files together
+                mapper = ColumnMapper()
+                cross_seed_analysis = mapper.analyze_seed_files_together(input_df, seed_dfs_dict)
+                
+                # Also collect individual analyses for each seed file
+                for seed_name, seed_df in seed_dfs_dict.items():
+                    # Analyze semantic similarity between columns
+                    semantic_mappings = mapper.analyze_column_semantic_similarity(input_df, seed_df, seed_name)
+                    
+                    # Identify primary-foreign key relationships
+                    pk_fk_relationships = mapper.identify_primary_foreign_keys(input_df, seed_df, seed_name)
+                    
+                    # Store in the cross-seed analysis results if not already there
+                    if 'all_mappings' not in cross_seed_analysis:
+                        cross_seed_analysis['all_mappings'] = {}
+                        
+                    if seed_name not in cross_seed_analysis['all_mappings']:
+                        cross_seed_analysis['all_mappings'][seed_name] = {}
+                        
+                    cross_seed_analysis['all_mappings'][seed_name]['semantic_mappings'] = semantic_mappings
+                    cross_seed_analysis['all_mappings'][seed_name]['pk_fk_relationships'] = pk_fk_relationships
+                
+                # Add an expander for cross-seed analysis
+                with st.expander("Cross-Seed Analysis", expanded=True):
+                    st.subheader("Analysis of All Seed Files Together")
+                    
+                    # Show all potential mappings from each seed file
+                    st.subheader("All Potential Mappings By Seed File")
+                    
+                    for seed_name, mappings in cross_seed_analysis['all_mappings'].items():
+                        with st.expander(f"Mapping Options for {seed_name}", expanded=True):
+                            if mappings['pk_fk_relationships']:
+                                st.markdown(f"##### Primary-Foreign Key Relationships:")
+                                
+                                relationships_data = []
+                                for rel in mappings['pk_fk_relationships']:
+                                    relationships_data.append({
+                                        "Foreign Key": rel['foreign_key'],
+                                        "Primary Key": f"{seed_name}.{rel['primary_key']}",
+                                        "Match Type": rel['match_type'],
+                                        "Confidence": f"{int(rel['confidence']*100)}%",
+                                        "Overlap": f"{int(rel['overlap_ratio']*100)}%"
+                                    })
+                                
+                                if relationships_data:
+                                    st.table(relationships_data)
+                                else:
+                                    st.info("No primary-foreign key relationships found")
+                                    
+                            if mappings['semantic_mappings']:
+                                st.markdown(f"##### Column Semantic Mappings:")
+                                
+                                semantic_data = []
+                                for mapping in mappings['semantic_mappings']:
+                                    semantic_data.append({
+                                        "Input Column": mapping['input_col'],
+                                        "Seed Column": mapping['seed_col'],
+                                        "Match Reason": mapping['match_reason'],
+                                        "Confidence": f"{int(mapping['confidence']*100)}%"
+                                    })
+                                
+                                if semantic_data:
+                                    st.table(semantic_data)
+                                else:
+                                    st.info("No semantic column mappings found")
+                    
+                    # Show common columns between seed files
+                    st.subheader("Common Columns Between Seed Files")
+                    for key, common in cross_seed_analysis['common_columns_between_seeds'].items():
+                        seed_names = key.split('_')
+                        st.markdown(f"##### Between **{seed_names[0]}** and **{seed_names[1]}**:")
+                        
+                        if common['exact_matches']:
+                            st.markdown(f"**Exact matches:** {', '.join(common['exact_matches'])}")
+                        
+                        if common['content_matches']:
+                            st.markdown("**Content matches:**")
+                            content_matches = []
+                            for match in common['content_matches']:
+                                content_matches.append({
+                                    "Column in " + seed_names[0]: match['seed1_col'],
+                                    "Column in " + seed_names[1]: match['seed2_col'],
+                                    "Overlap Ratio": f"{int(match['overlap_ratio']*100)}%"
+                                })
+                            st.table(content_matches)
             
             # Process each seed file
-            for i, (tab, seed) in enumerate(zip(tabs, all_seed_files)):
-                progress_percent = 40 + (i / len(all_seed_files)) * 50
+            for i, seed in enumerate(all_seed_files):
+                progress_percent = 50 + (i / len(all_seed_files)) * 40
                 status_text.text(f"Processing seed file: {seed['name']}")
                 progress_bar.progress(int(progress_percent))
                 
-                with tab:
+                with st.expander(f"Seed File: {seed['name']}", expanded=i==0):
                     # Display seed file preview
                     st.subheader("Seed File Preview")
                     st.dataframe(seed['df'].head(5))
                     
                     # Process the mapping
                     seed_name = os.path.splitext(seed['name'])[0]
-                    result_df, output_file, mapping_info, semantic_mappings = process_mapping(input_df, seed['df'], seed_name, output_dir)
+                    result_df, output_file, mapping_info, semantic_mappings, pk_fk_relationships = process_mapping(input_df, seed['df'], seed_name, output_dir)
+                    
+                    # Display primary-foreign key relationship information
+                    st.subheader("Primary-Foreign Key Relationships")
+                    
+                    if pk_fk_relationships:
+                        # Show all possible mapping options
+                        st.markdown("### All Possible Mapping Options")
+                        
+                        # Create tabs for each mapping option
+                        option_count = min(len(pk_fk_relationships), 10)  # Limit to top 10 options
+                        
+                        # Create a grid layout for mapping options
+                        cols = st.columns(2)
+                        
+                        for i, rel in enumerate(pk_fk_relationships[:option_count]):
+                            col_idx = i % 2
+                            confidence_percent = int(rel['confidence'] * 100)
+                            overlap_percent = int(rel['overlap_ratio'] * 100)
+                            
+                            with cols[col_idx]:
+                                with st.expander(f"Option {i+1}: {rel['foreign_key']} → {seed_name}.{rel['primary_key']} ({confidence_percent}%)", expanded=(i==0)):
+                                    st.markdown(f"""
+                                    - Primary Key: **{seed_name}.{rel['primary_key']}**
+                                    - Foreign Key: **{rel['foreign_key']}**
+                                    - Match Type: {rel['match_type']}
+                                    - Confidence: {confidence_percent}%
+                                    - Value Overlap: {overlap_percent}%
+                                    """)
+                        
+                        # Show all relationships in a table view as well
+                        with st.expander("View All Options in Table Format"):
+                            all_relationships = []
+                            for rel in pk_fk_relationships:
+                                confidence_percent = int(rel['confidence'] * 100)
+                                all_relationships.append({
+                                    "Foreign Key": rel['foreign_key'],
+                                    "Primary Key": f"{seed_name}.{rel['primary_key']}",
+                                    "Match Type": rel['match_type'],
+                                    "Confidence": f"{confidence_percent}%",
+                                    "Overlap": f"{int(rel['overlap_ratio'] * 100)}%"
+                                })
+                            st.table(all_relationships)
+                    else:
+                        st.info("No primary-foreign key relationships found")
                     
                     # Display mapping information
                     st.subheader("Column Mapping Information")
