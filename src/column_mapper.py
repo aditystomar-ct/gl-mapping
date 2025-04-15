@@ -218,6 +218,85 @@ class ColumnMapper:
         
         return gstin_columns
     
+    def analyze_column_semantic_similarity(self, input_df, seed_df, seed_name):
+        """
+        Analyze semantic similarity between columns in input_df and seed_df.
+        
+        Args:
+            input_df (pd.DataFrame): The input dataframe
+            seed_df (pd.DataFrame): The seed dataframe
+            seed_name (str): Name of the seed file
+            
+        Returns:
+            list: List of dictionaries containing column mappings with semantic similarity
+        """
+        # Preprocess dataframes
+        input_df = self._preprocess_dataframe(input_df)
+        seed_df = self._preprocess_dataframe(seed_df)
+        
+        semantic_mappings = []
+        
+        # Get common values between columns for better similarity detection
+        for input_col in input_df.columns:
+            input_col_lower = input_col.lower()
+            
+            for seed_col in seed_df.columns:
+                seed_col_lower = seed_col.lower()
+                match_reason = None
+                confidence = 0
+                
+                # Case 1: Exact name match
+                if input_col_lower == seed_col_lower:
+                    match_reason = "exact_name_match"
+                    confidence = 1.0
+                
+                # Case 2: One is contained in the other
+                elif input_col_lower in seed_col_lower or seed_col_lower in input_col_lower:
+                    match_reason = "substring_match"
+                    # Calculate similarity based on the length of shared characters
+                    common_length = min(len(input_col_lower), len(seed_col_lower))
+                    total_length = max(len(input_col_lower), len(seed_col_lower))
+                    confidence = 0.6 + (0.3 * (common_length / total_length))
+                
+                # Only check content if both are string columns and no high confidence match yet
+                elif input_df[input_col].dtype == 'object' and seed_df[seed_col].dtype == 'object':
+                    # Get sample values
+                    try:
+                        input_values = set(input_df[input_col].dropna().astype(str).sample(min(10, len(input_df))).values)
+                        seed_values = set(seed_df[seed_col].dropna().astype(str).sample(min(10, len(seed_df))).values)
+                        
+                        if input_values and seed_values:
+                            # Check for value overlap
+                            common_values = input_values.intersection(seed_values)
+                            if common_values:
+                                match_reason = "content_overlap"
+                                confidence = 0.5 + (0.4 * (len(common_values) / min(len(input_values), len(seed_values))))
+                    except:
+                        # Skip if there's an error during sampling
+                        pass
+                
+                # Add to mappings if confidence is high enough
+                if match_reason and confidence > 0.3:
+                    semantic_mappings.append({
+                        'input_col': input_col,
+                        'seed_col': seed_col,
+                        'seed_name': seed_name,
+                        'match_reason': match_reason,
+                        'confidence': confidence
+                    })
+        
+        # Sort by confidence
+        semantic_mappings.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Remove duplicates (keep highest confidence for each input column)
+        unique_mappings = {}
+        for mapping in semantic_mappings:
+            input_col = mapping['input_col']
+            if input_col not in unique_mappings or mapping['confidence'] > unique_mappings[input_col]['confidence']:
+                unique_mappings[input_col] = mapping
+        
+        return list(unique_mappings.values())
+    
     def _preprocess_dataframe(self, df):
         """
         Preprocess dataframe to standardize column names and data formats.

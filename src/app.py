@@ -29,13 +29,16 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
         output_dir (str): Directory to save output files
         
     Returns:
-        tuple: (result_dataframe, output_file_path, mapping_info)
+        tuple: (result_dataframe, output_file_path, mapping_info, semantic_mappings)
     """
     # Initialize the column mapper
     mapper = ColumnMapper()
     
     # Map columns using the seed file
     result_df, mapping_info = mapper.map_columns(input_df, seed_df)
+    
+    # Analyze semantic similarity between columns
+    semantic_mappings = mapper.analyze_column_semantic_similarity(input_df, seed_df, seed_name)
     
     # Generate output filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -44,19 +47,26 @@ def process_mapping(input_df, seed_df, seed_name, output_dir='output'):
     # Save the result
     result_df.to_csv(output_file, index=False)
     
-    # Print the mapping information
-    print("\nColumn Mapping Information:")
+    # Print the join key information
+    print("\n" + "="*60)
+    print(f"COLUMN MAPPING FOR {seed_name.upper()}")
+    print("="*60)
+    
     if mapping_info['join_key']:
-        print(f"Join Key: Input column '{mapping_info['join_key']['input']}' is mapped to Seed column '{mapping_info['join_key']['seed']}'")
+        print(f"Join Key: {mapping_info['join_key']['input']} -> {seed_name}.{mapping_info['join_key']['seed']}")
     
-    print("\nAdditional Column Mappings:")
-    if mapping_info['matched_columns']:
-        for match in mapping_info['matched_columns']:
-            print(f"Input column '{match['input']}' is mapped to Seed column '{match['seed']}'")
+    # Print the semantic column mappings
+    print("\nColumn Mappings:")
+    if semantic_mappings:
+        # Sort by confidence
+        for mapping in sorted(semantic_mappings, key=lambda x: x['confidence'], reverse=True):
+            confidence_percent = int(mapping['confidence'] * 100)
+            if confidence_percent >= 60:  # Only show reasonably confident mappings
+                print(f"{mapping['input_col']} -> {seed_name}.{mapping['seed_col']} ({confidence_percent}% confidence)")
     else:
-        print("No additional column mappings found")
+        print("No column mappings found")
     
-    return result_df, output_file, mapping_info
+    return result_df, output_file, mapping_info, semantic_mappings
 
 
 def run_cli(output_dir='output'):
@@ -106,8 +116,31 @@ def run_cli(output_dir='output'):
     
     print(f"Found {len(seed_files)} seed files")
     
-    # Process each seed file
-    for seed_file in seed_files:
+    # Ask user which seed files to use if there are multiple
+    if len(seed_files) > 1:
+        print("\nAvailable seed files:")
+        for i, file in enumerate(seed_files):
+            print(f"{i+1}. {file}")
+        
+        try:
+            selection = input("\nEnter seed file numbers to use (comma separated, or 'all'): ")
+            if selection.lower().strip() == 'all':
+                selected_seed_files = seed_files
+            else:
+                indices = [int(idx.strip()) - 1 for idx in selection.split(',')]
+                selected_seed_files = [seed_files[i] for i in indices if 0 <= i < len(seed_files)]
+        except (ValueError, IndexError):
+            print("Invalid selection, using all seed files")
+            selected_seed_files = seed_files
+    else:
+        selected_seed_files = seed_files
+    
+    # Process each selected seed file
+    for seed_file in selected_seed_files:
+        print("\n" + "="*60)
+        print(f"PROCESSING SEED FILE: {seed_file}")
+        print("="*60)
+        
         seed_path = os.path.join(seed_dir, seed_file)
         # Handle potential issues with CSV files (like commas in headers)
         seed_df = pd.read_csv(seed_path, skipinitialspace=True)
@@ -115,7 +148,7 @@ def run_cli(output_dir='output'):
         
         # Process the mapping
         seed_name = os.path.splitext(os.path.basename(seed_file))[0]
-        _, output_file, mapping_info = process_mapping(input_df, seed_df, seed_name, output_dir)
+        _, output_file, mapping_info, semantic_mappings = process_mapping(input_df, seed_df, seed_name, output_dir)
         print(f"Saved mapped data to {output_file}")
     
     print("GL mapping completed successfully")
@@ -244,6 +277,32 @@ def run_streamlit():
                 seed_dir = 'seeds'
                 existing_seed_files = glob.glob(os.path.join(seed_dir, '*.csv'))
                 
+                if existing_seed_files:
+                    # Allow user to select which seed files to use
+                    file_names = [os.path.basename(path) for path in existing_seed_files]
+                    
+                    # Create a selection widget in the main content area
+                    st.subheader("Select Seed Files to Use")
+                    selected_files = st.multiselect(
+                        "Choose which seed files to process",
+                        file_names,
+                        default=file_names  # Default to all files selected
+                    )
+                    
+                    if not selected_files:
+                        st.warning("No seed files selected. Please select at least one seed file.")
+                        return
+                    
+                    # Update status
+                    status_text.text(f"Processing {len(selected_files)} selected seed files...")
+                    
+                    # Filter to only selected files
+                    existing_seed_files = [
+                        path for path in existing_seed_files
+                        if os.path.basename(path) in selected_files
+                    ]
+                
+                # Process the selected seed files
                 for seed_path in existing_seed_files:
                     seed_df = pd.read_csv(seed_path, skipinitialspace=True)
                     all_seed_files.append({
@@ -275,11 +334,61 @@ def run_streamlit():
                     
                     # Process the mapping
                     seed_name = os.path.splitext(seed['name'])[0]
-                    result_df, output_file = process_mapping(input_df, seed['df'], seed_name, output_dir)
+                    result_df, output_file, mapping_info, semantic_mappings = process_mapping(input_df, seed['df'], seed_name, output_dir)
                     
-                    # Display result preview
-                    st.subheader("Mapping Result Preview")
-                    st.dataframe(result_df.head(10))
+                    # Display mapping information
+                    st.subheader("Column Mapping Information")
+                    
+                    # Display semantic mappings in the requested format
+                    if semantic_mappings:
+                        # Create formatted strings like "input_col -> seed_name.seed_col"
+                        st.markdown("### Semantic Column Mappings")
+                        
+                        # Create two columns for better presentation
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("#### High Confidence Mappings (80%+)")
+                            high_confidence = [m for m in semantic_mappings if m['confidence'] >= 0.8]
+                            if high_confidence:
+                                for mapping in sorted(high_confidence, key=lambda x: x['confidence'], reverse=True):
+                                    confidence = int(mapping['confidence'] * 100)
+                                    st.markdown(f"**{mapping['input_col']}** → **{seed_name}.{mapping['seed_col']}** ({confidence}%)")
+                            else:
+                                st.info("No high confidence mappings found")
+                        
+                        with col2:
+                            st.markdown("#### Medium Confidence Mappings (60-80%)")
+                            medium_confidence = [m for m in semantic_mappings if 0.6 <= m['confidence'] < 0.8]
+                            if medium_confidence:
+                                for mapping in sorted(medium_confidence, key=lambda x: x['confidence'], reverse=True):
+                                    confidence = int(mapping['confidence'] * 100)
+                                    st.markdown(f"**{mapping['input_col']}** → **{seed_name}.{mapping['seed_col']}** ({confidence}%)")
+                            else:
+                                st.info("No medium confidence mappings found")
+                    else:
+                        st.info("No column mappings found")
+                    
+                    # For technical users, still show the detailed mapping information
+                    with st.expander("Technical Mapping Details"):
+                        # Display join key information
+                        if mapping_info['join_key']:
+                            st.success(f"Join Key: Input column '**{mapping_info['join_key']['input']}**' is mapped to Seed column '**{mapping_info['join_key']['seed']}**' (Confidence: {mapping_info['join_key']['confidence']:.2f})")
+                        
+                        # Display additional column mappings
+                        if mapping_info['matched_columns']:
+                            st.write("Additional Column Mappings:")
+                            mapping_data = []
+                            for match in mapping_info['matched_columns']:
+                                mapping_data.append({
+                                    "Input Column": match['input'],
+                                    "Seed Column": match['seed'],
+                                    "Match Type": match['match_type'],
+                                    "Confidence": f"{match['confidence']:.2f}"
+                                })
+                            st.table(mapping_data)
+                        else:
+                            st.info("No additional column mappings found beyond the join key")
                     
                     # Download button for the result
                     with open(output_file, 'rb') as f:
