@@ -10,3 +10,13 @@ xlrd==2.0.1      # For reading older Excel files (.xls)
 
 # Web interface
 streamlit==1.27.0
+
+# Utilities
+tabulate==0.9.0  # For pretty-printing tables in the mapping visualizer
+
+# Jupyter environment
+jupyter==1.0.0
+notebook==7.0.7
+ipykernel==6.28.0
+matplotlib==3.8.2
+seaborn==0.13.1
