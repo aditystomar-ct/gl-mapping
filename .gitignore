@@ -8,10 +8,27 @@ wheels/
 .DS_Store
 
 # Virtual environments
-.venv
+venv/
+.venv/
+env/
+.env/
 .aider*
 .env
 
 # Data folders
-input
-seeds
+input/
+seeds/
+output/
+
+# Response files and temporary files
+response_*/
+**/response_*/
+.ipynb_checkpoints/
+*.log
+
+# Jupyter notebook files (if you don't want to track them)
+# *.ipynb
+
+# IDE files
+.vscode/
+.idea/
