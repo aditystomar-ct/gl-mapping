@@ -1,24 +1,17 @@
 import os
-import glob
+import argparse
 import pandas as pd
-import numpy as np
 import re
 import unicodedata
 
-# Best normalize and clean functions
-def normalize_text(text):
-    """Normalize unicode, lowercase, and strip extra spaces."""
-    if pd.isnull(text):
-        return ''
-    text = unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode('ascii')
-    return text.lower().strip()
+# === Utility Functions ===
 
 def clean_text(text):
-    """Remove unwanted characters but keep basic meaning."""
-    if pd.isnull(text):
-        return ''
-    text = re.sub(r'[^a-zA-Z0-9.%/,-]', '', text)  # Keep ., %, -, /
-    return text
+    return re.sub(r'[^a-zA-Z0-9.%/,-]', '', text)
+
+def normalize_text(text):
+    """Remove hidden Unicode control characters like \u202d"""
+    return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
 
 def is_numeric(s):
     return s.apply(lambda x: re.fullmatch(r'\d+', x) is not None).all()
@@ -27,7 +20,7 @@ def is_decimal(s):
     return s.apply(lambda x: re.fullmatch(r'\d+\.\d+', x) is not None).all()
 
 def has_special_characters(s):
-    return s.apply(lambda x: any(c in x for c in ['/', '-', ',', '.', '%'])).all()
+    return s.apply(lambda x: any(c in x for c in ['/', '-', ',', '.', '%'])).any()
 
 def is_alphanumeric(s):
     return s.apply(lambda x: re.fullmatch(r'[A-Za-z0-9]+', x) is not None).all()
@@ -43,28 +36,7 @@ def fixed_length(s):
     lengths = cleaned.apply(len).unique()
     return len(lengths) == 1
 
-def load_input_file(input_directory):
-    files = glob.glob(os.path.join(input_directory, "*.xlsx"))
-    if not files:
-        raise FileNotFoundError("No XLSX file found.")
-    file_path = files[0]
-    df = pd.read_excel(file_path, skiprows=0)
-    df_for_mapping = df.head(10)
-    print(f"Loaded input file '{file_path}' with {len(df)} rows. Using top 10 rows for mapping.")
-    return df, df_for_mapping
-
-def load_seed_files(seed_directory):
-    seed_files = glob.glob(os.path.join(seed_directory, "*.csv"))
-    seeds = {}
-    for file in seed_files:
-        df = pd.read_csv(file, skipinitialspace=True, dtype=str)
-        df.columns = df.columns.str.strip()
-        filename = os.path.splitext(os.path.basename(file))[0]
-        seeds[filename] = df
-        print(f"Loaded seed file: '{filename}' with {len(df)} rows.")
-    return seeds
-
-def find_primary_keys(df, tolerance=0):
+def find_primary_keys(df, tolerance=0): # From testing.ipynb
     primary_keys = []
     for col in df.columns:
         s = df[col].dropna().astype(str).apply(normalize_text).apply(clean_text)
@@ -75,18 +47,16 @@ def find_primary_keys(df, tolerance=0):
         
         if total_count - unique_count <= tolerance:
             primary_keys.append(col)
-            print(f"Primary key candidate: '{col}' (Total: {total_count}, Unique: {unique_count})")
+            # print(f"Primary key candidate: '{col}' (Total: {total_count}, Unique: {unique_count})")
         else:
-            # 🆕 Debug print if duplicates found
-            print(f"\n⚠️ Column '{col}' not picked as primary key (Total: {total_count}, Unique: {unique_count}).")
-            print(f"Finding duplicates for '{col}'...\n")
+            # Debug print if duplicates found
+            # print(f"\nColumn '{col}' not picked as primary key (Total: {total_count}, Unique: {unique_count}).")
+            # print(f"Finding duplicates for '{col}'...\n")
             duplicated_values = s[s.duplicated(keep=False)]
             if not duplicated_values.empty:
                 print(df.loc[duplicated_values.index, [col]])
             print("-" * 50)
-
     return primary_keys
-
 
 def analyze_column_properties(s):
     cleaned_s = s.dropna().astype(str).apply(normalize_text).apply(clean_text)
@@ -107,6 +77,7 @@ def map_columns(input_sample, seed_col_name, seed_col_values, seed_props):
         s_input = input_sample[col].dropna().astype(str).apply(normalize_text).apply(clean_text)
         if s_input.empty:
             continue
+
         input_props = {
             'is_numeric': is_numeric(s_input),
             'is_decimal': is_decimal(s_input),
@@ -116,43 +87,125 @@ def map_columns(input_sample, seed_col_name, seed_col_values, seed_props):
             'is_fixed_length': fixed_length(s_input),
             'length': s_input.apply(len).unique()[0] if fixed_length(s_input) else None
         }
+
         conditions = all(seed_props[key] == input_props.get(key) for key in seed_props)
         if conditions:
             print(f"Matched input column '{col}' for seed column '{seed_col_name}'")
             matches.append(col)
-    if not matches:
+    
+    if not matches: # Added from notebook
         print(f"No match found for seed column '{seed_col_name}'")
     return matches
 
-# === Step 8: Full Processing Flow ===
-input_directory = "input"
-seed_directory = "seeds"
+# === Main Execution Logic ===
 
-full_input_df, input_sample = load_input_file(input_directory)
-seeds = load_seed_files(seed_directory)
+def infer_keys(transactions_path, master_paths):
+    # Load input file (transaction file)
+    full_input_df = pd.read_excel(transactions_path, skiprows=2, dtype=str)
+    input_sample = full_input_df.head(10)
+    print(f"Loaded input file '{transactions_path}' with {len(full_input_df)} rows. Using top 10 rows for mapping.")
 
-all_mappings = {}
+    # Load seed files (master files)
+    seeds = {}
+    for path in master_paths:
+        df = pd.read_csv(path, skipinitialspace=True, dtype=str)
+        df.columns = df.columns.str.strip()
+        seed_name = os.path.splitext(os.path.basename(path))[0]
+        seeds[seed_name] = df
+        print(f"Loaded seed file: '{seed_name}' with {len(df)} rows.")
 
-for seed_name, seed_df in seeds.items():
-    print(f"\n=== Processing seed file '{seed_name}' ===")
-    primary_keys = find_primary_keys(seed_df, tolerance=0)
+    all_mappings = {}
+    final_verified_mappings = {}
 
-    mappings = []
-    for pk_col in primary_keys:
-        if pk_col not in seed_df.columns:
-            continue
-        seed_col_values = seed_df[pk_col]
-        seed_props = analyze_column_properties(seed_col_values)
+    for seed_name, seed_df_loop_var in seeds.items(): # Renamed seed_df to avoid conflict with outer scope if any
+        print(f"\n=== Processing seed file '{seed_name}' ===")
+        primary_keys = find_primary_keys(seed_df_loop_var)
 
-        print(f"\nProperties for seed column '{pk_col}': {seed_props}")
-        
-        matched_cols = map_columns(input_sample, pk_col, seed_col_values, seed_props)
+        mappings_list_inner = [] # Renamed to avoid conflict
+        for pk_col in primary_keys:
+            if pk_col not in seed_df_loop_var.columns:
+                continue
 
-        if matched_cols:
-            mappings.append({
-                'seed_column': pk_col,
-                'matched_input_columns': matched_cols,
-                'seed_properties': seed_props
-            })
+            seed_col_values = seed_df_loop_var[pk_col]
+            seed_props = analyze_column_properties(seed_col_values)
 
-    all_mappings[seed_name] = mappings
+            print(f"\nProperties for seed column '{pk_col}': {seed_props}")
+
+            matched_cols = map_columns(input_sample, pk_col, seed_col_values, seed_props)
+
+            if matched_cols:
+                mappings_list_inner.append({
+                    'seed_column': pk_col,
+                    'matched_input_columns': matched_cols,
+                    'seed_properties': seed_props
+                })
+        all_mappings[seed_name] = mappings_list_inner
+
+    print("\n=== Final Mapping Results ===") # From notebook
+    for seed_name_map_results, mappings_list_results in all_mappings.items():
+        for mapping_item_results in mappings_list_results:
+            input_cols_results = ", ".join(mapping_item_results['matched_input_columns'])
+            print(f"Seed File '{seed_name_map_results}': '{mapping_item_results['seed_column']}' -> {input_cols_results}")
+
+    # Verification loop from notebook
+    for seed_name_verify, mappings_list_verify in all_mappings.items():
+        final_verified_mappings[seed_name_verify] = []
+        for mapping_item_verify in mappings_list_verify:
+            seed_column_name_verify = mapping_item_verify['seed_column']
+            
+            current_seed_df = seeds[seed_name_verify] # Get the correct seed_df for this iteration
+            full_seed_col_values = current_seed_df[seed_column_name_verify].dropna().astype(str).apply(lambda x: x.strip())
+
+            for input_col_name_verify in mapping_item_verify['matched_input_columns']:
+                if input_col_name_verify not in full_input_df.columns:
+                    continue
+
+                full_input_col_values = full_input_df[input_col_name_verify].dropna().astype(str).apply(lambda x: normalize_text(x.strip()))
+                input_unique = set(full_input_col_values)
+                seed_unique = set(full_seed_col_values)
+
+                if not input_unique: # if input_unique is empty
+                    continue
+
+                common_elements = input_unique & seed_unique
+                # Handle division by zero if input_unique is empty (though checked above)
+                ratio = len(common_elements) / len(input_unique) if len(input_unique) > 0 else 0.0
+
+
+                print(f"\nMapping Attempt: '{seed_name_verify}:{seed_column_name_verify}' -> '{input_col_name_verify}'")
+                # Optional detailed prints from notebook (can be very verbose)
+                # print(f"Input Unique Values ({input_col_name_verify}): {sorted(list(input_unique))}")
+                # print(f"Seed Unique Values ({seed_column_name_verify}): {sorted(list(seed_unique))}")
+                # print(f"Common Values: {sorted(list(common_elements))}")
+                print(f"Input Unique Count: {len(input_unique)}, Common Count: {len(common_elements)}, Ratio: {ratio:.2f}")
+
+                if ratio >= 0.8:
+                    print(" Mapping Accepted based on Common Elements Ratio.\n")
+                    final_verified_mappings[seed_name_verify].append({
+                        'seed_column': seed_column_name_verify,
+                        'input_column': input_col_name_verify,
+                        'ratio': ratio
+                    })
+                else:
+                    print("Mapping Rejected based on Common Elements Ratio.\n")
+
+    print("\n=== Final Verified Mappings ===")
+    for seed_name_final, verified_list_final in final_verified_mappings.items():
+        for verified_item_final in verified_list_final:
+            print(f"Seed File '{seed_name_final}': Seed Column '{verified_item_final['seed_column']}' -> Input Column '{verified_item_final['input_column']}' (Ratio: {verified_item_final['ratio']:.2f})")
+
+# === CLI Parser ===
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Infer foreign keys in transactions file and identify associated master file columns.'
+    )
+    parser.add_argument('--transactions', type=str, required=True, help='Path to the transactions XLSX file.')
+    parser.add_argument('--masters', type=str, nargs='+', required=True, help='Paths to one or more master CSV files.')
+    return parser.parse_args()
+
+# === Entry Point ===
+
+if __name__ == '__main__':
+    args = parse_args()
+    infer_keys(args.transactions, args.masters)
